@@ -40,6 +40,8 @@ python-arango = "*"
 
 [dev-packages]
 autopep8 = "*"
+pymongo = "*"
+gql = "*"
 
 [requires]
 # python_version = "3.8"
