@@ -1,13 +1,15 @@
 # Lens Search backend
 
-This repository holds the backend source code for  Lens Search. To run this repository you will need Python 3.7+ installed. For the virtual environment you could use Pipenv
+This repository holds the backend source code for Lens Search. 
+
+To run this repository you will need Python 3.7+ installed. For the virtual environment you could use Pipenv
 
 1. Activate the virtual environment
 ```
 pipenv shell
 ```
 
-2. Istall the dependecies
+2. Install the dependecies
 ```
 pipenv install
 ```
@@ -34,3 +36,4 @@ https://lens-api.sepana.io/
 Swagger Doc:
 
 https://lens-api.sepana.io/docs
+
