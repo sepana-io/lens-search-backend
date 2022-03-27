@@ -1,3 +1,5 @@
+from functools import reduce
+import operator
 import os
 from datetime import date, datetime, timedelta
 from services.es_search import es
@@ -6,27 +8,32 @@ from elasticsearch import helpers
 from pydantic import BaseModel
 from typing import List, Optional
 
+
 class SearchType(str, Enum):
     exact_phrase = "exact_phrase"
     all_words = "all_words"
     any_words = "any_words"
     hashtags = "hashtags"
     none_of_words = "none_of_words"
-    
+
+
 class QueryMatchType(str, Enum):
     should = "should"
     must = "must"
     must_not = "must_not"
     shoul_not = "shoul_not"
-    
+
     def __str__(self):
         return str(self.value)
+
 
 class ResultType(str, Enum):
     latest = "latest"
     links = "links"
     photo = "photo"
     video = "video"
+    top = "top"
+
 
 class AttributesSchema(BaseModel):
     traitType: str
@@ -52,9 +59,13 @@ class MetadataSchema(BaseModel):
     appId: str
     profileId: Optional[str]
 
+
 INDEX = os.getenv("LENS_DATA_INDEX", "lens-test-data")
-LENS_PROFILE_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-profile-data")
-POSTS_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-posts-data")
+LENS_PROFILE_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-profile-csv-data")
+LENS_PROFILE_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-final-profiles-data")
+POSTS_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-final-posts-data")
+NFTS_INDEX = os.getenv("LENS_NFTS_INDEX", "lens-nfts-test-data")
+
 
 def get_match_query(search_type, text, field):
     if search_type == SearchType.hashtags:
@@ -66,118 +77,116 @@ def get_match_query(search_type, text, field):
         res = {"match": {field: {"query": text, "operator": "and"}}}
     return res
 
-def search_contents(text = None, search_type = SearchType.any_words, \
-        description = None, profile_id = None, app_id = None, name: str = None, \
-        trait_type: str = None, attribute_value: int = 0, size: int = 10, \
-        page: int = 1, from_date: date = None, to_date: date = None, \
-        result_type: ResultType = ResultType.latest, retrying: bool = False,):
-    
-    sort_by = {"ingested_at": "desc"}
-    query = {
-        "query": {
-            "bool": {
-                "must_not": [],
-                "must": [],
-                "should": [],
-            }
-        },
-        "size": size,
-        "from": (page - 1 if page > 0 else 0) * size,
-        "sort": sort_by
+
+def search_publications(text="", bio: str = None, from_users: str = None, mention_users: str = None, search_type=SearchType.any_words,
+                        result_type: ResultType = ResultType.latest, min_collects: int = None,  min_mirror: int = None, min_comments: int = None,
+                        min_profile_follower: int = None, min_profile_posts: int = None, app_id: str = None, from_date: date = None,
+                        to_date: date = None, page: int = 1, size: int = 10, retrying: bool = False):
+
+    results_map = {"links": {"metadata.content": "http https"}, "photo": {
+        "metadata.media.type": "image"}, "video": {"metadata.media.type": "video"}}
+    result_type_info = results_map.get(
+        result_type.value, {}) if result_type else {}
+    must_query_field_values = {
+        "metadata.appId": app_id,
+        "profile.handle": from_users,
+        "profile.bio": bio,
+        "metadata.description": mention_users
     }
 
-    if profile_id:
-        q = {"match": {"profileId": profile_id}}
-        query["query"]["bool"]["must"].append(q)
-        query["suggest"] = { "profile_id": { "text": profile_id, "term": { "field": "profileId" }}}
-    
-    if app_id:
-        q = {"match": {"appId": app_id}}
-        query["query"]["bool"]["must"].append(q)
-        query["suggest"] = { "app_id": { "text": app_id, "term": { "field": "appId" }}}
-    
-    if trait_type:
-        q = {"match": {"attributes.traitType": trait_type}}
-        query["query"]["bool"]["must"].append(q)
-    
-    if attribute_value:
-        q = {"match": {"attributes.value": attribute_value}}
-        query["query"]["bool"]["must"].append(q)
-    
-    if name:
-        q = {"match": {"name": name}}
-        query["query"]["bool"]["must"].append(q)
-        query["suggest"] = { "name": { "text": name, "term": { "field": "name" }}}
-    
-    if text:
-        if search_type == SearchType.none_of_words:
-            query["query"]["bool"]["must_not"].append(
-                {"match": {"content": text}})
-        else:
-            query["query"]["bool"]["must"].append(get_match_query(search_type, text, "content"))
-            query["suggest"] = { "text": { "text": text, "term": { "field": "content" }}}
-    
-    if description:
-        q = {"match": {"description": {
-            "query": description, "operator": "and"}}}
-        query["query"]["bool"]["must"].append(q)
+    should_query_fields = set(["metadata.content", "metadata.description", "metadata.name", "profile.name", "profile.id",
+                               "profile.bio", "profile.location", "profile.handle", "profile.twitterUrl", "profile.ownedBy"])
+    should_query_field_values = {field: text for field in should_query_fields}
 
-    ingested_at_q = {}
-    if from_date:
-        ingested_at_q["gte"] = from_date
-
-    if to_date and to_date != date.today():
-        ingested_at_q["lte"] = to_date
-
-    if ingested_at_q:
-        q = {"range": {"ingested_at": ingested_at_q}}
-        query["query"]["bool"]["must"].append(q)
-
-    if result_type == ResultType.links:
-        q = {"match": {"content": {"query": "http https"}}}
-        query["query"]["bool"]["must"].append(q)
-
-    if result_type == ResultType.photo:
-        q = {"match": {"media.mimeType": {"query": "image"}}}
-        query["query"]["bool"]["must"].append(q)
-
-    if result_type == ResultType.video:
-        q = {"match": {"media.mimeType": {"query": "video"}}}
-        query["query"]["bool"]["must"].append(q)   
-
-
-    res = es.search(index=INDEX, body=query)
+    gte_range_query_field_values = {
+        "stats.totalAmountOfMirrors": min_mirror,
+        "stats.totalAmountOfCollects": min_collects,
+        "stats.totalAmountOfComments": min_comments,
+        "profile.stats.totalFollowers": min_profile_follower,
+        "profile.stats.totalPosts": min_profile_posts
+    }
+    sort_by = {"createdAt": "desc"} if result_type != ResultType.top else None
+    res = search(POSTS_INDEX, must_query_field_values, should_query_field_values, search_type, gte_range_query_field_values,
+                 prefix_field_values=result_type_info, page=page, size=size, sort_by=sort_by)
 
     if len(res["hits"]["hits"]) == 0 and not retrying:
-        suggestion = get_search_suggestion(res)
+        suggestion_res = get_search_suggestion(res, False)
+        bio = suggestion_res.get("profile.bio", [bio])[0] if bio else None
+        from_users = suggestion_res.get("profile.handle", from_users)[0] if from_users else None
+        # do not consider suggestion for must fields (handle and bio) again in should fields
+        if bio:
+            suggestion_res.pop("profile.bio", None)
+        if from_users:
+            suggestion_res.pop("profile.handle", None)
+        should_suggestions = [suggestion_res.get(
+            field) for field in should_query_fields if field in suggestion_res]
+        should_suggestions = list(
+            reduce(operator.concat, should_suggestions, []))
+        suggestion = should_suggestions[0] if should_suggestions else ""
+        if SearchType.any_words == search_type:
+            suggestion = " ".join(should_suggestions)
         if suggestion:
-            text = suggestion.get("text", text)
-            profile_id = suggestion.get("profile_id", profile_id)
-            app_id = suggestion.get("app_id", app_id)
+            text = suggestion
+        return search_publications(text, bio, from_users, mention_users, search_type, result_type, min_collects,
+                                   min_mirror, min_comments, min_profile_follower, min_profile_posts, app_id,
+                                   from_date, to_date, page, size, retrying=True)
 
-            return search_contents(
-                text, SearchType.any_words, description, profile_id, app_id, \
-                name, trait_type, attribute_value, size, page, from_date, to_date, \
-                result_type, retrying=True
-            )
-
-    data = res["hits"]["hits"]
+    data = list(map(lambda x: x["_source"], res["hits"]["hits"]))
     return {
         "page": page, "size": len(data), "total_count": res["hits"]["total"]["value"], "data": data,
         "query": {
-            "text": text, 
-            "profile_id": profile_id, 
-            "app_id": app_id, 
-            "description": description, 
-            "trait_type": trait_type,
-            "search_type": search_type 
+            "text": text,
+            "min_collects": min_collects,
+            "min_comments": min_comments,
+            "min_mirror": min_mirror
         }}
-    
 
-def search_publications(text = "", search_type = SearchType.any_words, min_collects:int = None, min_mirror:int = None, 
-                        min_comments:int = None, app_id:str = None, from_date:date=None, to_date:date=None,
-                        page:int = 1, size:int = 10, retrying:bool=False):
-    
+
+def search_profiles(text: str, bio: str, owned_by: str, min_follower: int, min_posts: int, min_publications: int, min_comments: int,
+                    page: int = 1, size: int = 10, retrying=False):
+
+    must_query_field_values = {
+        "ownedBy": owned_by,
+        "bio": bio
+    }
+
+    should_query_fields = ["name", "bio", "location", "handle", "twitterUrl"]
+    should_query_field_values = {field: text for field in should_query_fields}
+
+    gte_range_query_field_values = {
+        "stats.totalFollowers": min_follower,
+        "stats.totalPublications": min_publications,
+        "stats.totalComments": min_comments,
+        "stats.totalPosts": min_posts
+    }
+    res = search(LENS_PROFILE_INDEX, must_query_field_values, should_query_field_values,
+                 SearchType.any_words, gte_range_query_field_values, page=page, size=size)
+
+    if len(res["hits"]["hits"]) == 0 and not retrying:
+        suggestion_res = get_search_suggestion(res)
+        bio = suggestion_res.get("bio", bio) if bio else None
+        if bio:
+            suggestion_res.pop("bio", None)
+        suggestion = " ".join(suggestion_res.values())
+        if suggestion:
+            text = suggestion
+        return search_profiles(text, bio, owned_by, min_follower, min_posts, min_publications, min_comments, page, size, retrying=True)
+
+    data = list(map(lambda x: x["_source"], res["hits"]["hits"]))
+    return {
+        "page": page, "size": len(data), "total_count": res["hits"]["total"]["value"], "data": data,
+        "query": {
+            "text": text,
+            "owned_by": owned_by,
+            "min_follower": min_follower,
+            "min_posts": min_posts,
+            "min_publications": min_publications,
+            "min_comments": min_comments
+        }}
+
+
+def search_nfts(text="", search_type=SearchType.any_words, page: int = 1, size: int = 10, retrying: bool = False):
+
     query = {
         "query": {
             "bool": {
@@ -187,25 +196,18 @@ def search_publications(text = "", search_type = SearchType.any_words, min_colle
             }
         },
         "size": size,
-        "from": (page - 1 if page > 0 else 0) * size,
-        "sort": {"createdAt": "desc"}
+        "from": (page - 1 if page > 0 else 0) * size
     }
-    add_match_query("appId", app_id, query, QueryMatchType.must)
-    
+
     if text:
-        text_query_fields = ["metadata.content", "metadata.description", "metadata.name", "profile.name", "profile.id",
-                             "profile.bio", "profile.location", "profile.handle", "profile.twitterUrl", "profile.ownedBy"]
+        text_query_fields = ["contractName", "contractAddress", "symbol", "tokenId", "owners.address", "ercType",
+                             "name", "description", "contentURI", "originalContent.uri", "collectionName"]
         query_field_values = [(field, text) for field in text_query_fields]
-        add_match_query_multi(query_field_values, query, QueryMatchType.should, search_type)
+        add_match_query_multi(query_field_values, query,
+                              QueryMatchType.should, search_type)
         query["query"]["bool"]["minimum_should_match"] = 1
-        add_query_suggestion(text, query, text_query_fields)
-    
-    number_query_fields = [("stats.totalAmountOfMirrors", min_mirror), 
-                           ("stats.totalAmountOfCollects", min_collects),
-                           ("stats.totalAmountOfComments", min_comments),
-                           ]
-    add_range_query_multi(number_query_fields, query)
-    res = es.search(index=POSTS_INDEX, body=query)
+        add_query_suggestions(text, query, text_query_fields)
+    res = es.search(index=NFTS_INDEX, body=query)
 
     if len(res["hits"]["hits"]) == 0 and not retrying:
         suggestions = list(get_search_suggestion(res).values())
@@ -213,92 +215,79 @@ def search_publications(text = "", search_type = SearchType.any_words, min_colle
         if SearchType.any_words == search_type:
             suggestion = " ".join(suggestions)
         if suggestion:
-            return search_publications(suggestion, search_type, min_collects, min_mirror, min_comments, from_date, to_date, page, size, retrying=True)
+            return search_nfts(suggestion, search_type, page, size, retrying=True)
 
-    data = list(map(lambda x:x["_source"], res["hits"]["hits"]))
+    data = list(map(lambda x: x["_source"], res["hits"]["hits"]))
     return {
         "page": page, "size": len(data), "total_count": res["hits"]["total"]["value"], "data": data,
-        "query": {
-            "text": text,
-            "min_collects": min_collects, 
-            "min_comments": min_comments, 
-            "min_mirror": min_mirror
-        }}
-    
-def search_profiles(text:str, owned_by:str, min_follower:int, min_posts:int, min_publications:int, min_comments:int, 
-                    page: int = 1, size: int = 10, retrying=False):
-    
+        "query": {"text": text}
+    }
+
+
+def search(es_index: str, must_query_field_values, should_query_field_values, search_type, gte_range_query_field_values, prefix_field_values: dict = {}, sort_by: str = None,  page: int = 1, size: int = 10):
     query = {
         "query": {
             "bool": {
                 "must_not": [],
-                "must": []
+                "must": [],
+                "should": [],
             }
         },
         "size": size,
-        "from": (page - 1 if page > 0 else 0) * size
+        "from": (page - 1 if page > 0 else 0) * size,
+        "suggest": {}
     }
-    add_match_query("ownedBy", owned_by, query, QueryMatchType.must)
-    
-    if text:
-        text_query_fields = ["name", "bio", "location", "handle", "twitterUrl"]
-        query_field_values = [(field, text) for field in text_query_fields]
-        add_match_query_multi(query_field_values, query, "should")
+    if sort_by:
+        query["sort"] = sort_by
+    add_match_query_multi(should_query_field_values.items(),
+                          query, QueryMatchType.should, search_type)
+    add_match_query_multi(must_query_field_values.items(),
+                          query, QueryMatchType.must, search_type)
+    add_query_suggestions(query, should_query_field_values.items())
+    add_query_suggestions(query, must_query_field_values.items())
+    add_range_query_multi(gte_range_query_field_values.items(), query)
+    add_prefix_query_multi(prefix_field_values.items(), query)
+    if query["query"]["bool"]["should"]:
         query["query"]["bool"]["minimum_should_match"] = 1
-        add_query_suggestion(text, query, text_query_fields)
-    
-    number_query_fields = [("stats.totalFollowers", min_follower), 
-                           ("stats.totalPublications", min_publications),
-                           ("stats.totalPosts", min_posts),
-                           ("stats.totalComments", min_comments)
-                           ]
-    add_range_query_multi(number_query_fields, query)
-    res = es.search(index=LENS_PROFILE_INDEX, body=query)
+    res = es.search(index=es_index, body=query)
+    return res
 
-    if len(res["hits"]["hits"]) == 0 and not retrying:
-        suggestion = get_search_suggestion(res)
-        suggestion = " ".join(suggestion.values())
-        if suggestion:
-            return search_profiles(suggestion, owned_by, min_follower, min_posts, min_publications, min_comments, page, size, retrying=True)
 
-    data = list(map(lambda x:x["_source"], res["hits"]["hits"]))
-    return {
-        "page": page, "size": len(data), "total_count": res["hits"]["total"]["value"], "data": data,
-        "query": {
-            "text": text, 
-            "owned_by": owned_by, 
-            "min_follower": min_follower, 
-            "min_posts": min_posts, 
-            "min_publications": min_publications,
-            "min_comments": min_comments 
-        }}
+def add_query_suggestions(query, field_values):
+    for field, q in field_values:
+        add_query_suggestion(q, field, query)
 
-def add_query_suggestion(q, query, fields):
-    query["suggest"] = {
-        field: {
-            "text": q,
-            "term": {
-                "field": field
+
+def add_query_suggestion(q, field, query):
+    if q:
+        query["suggest"].update({
+            field: {
+                "text": q,
+                "term": {
+                    "field": field
+                }
             }
-        } for field in fields
-    }
+        })
 
-def get_search_suggestion(res):
+
+def get_search_suggestion(res, flatten=True):
     out = {}
     if not "suggest" in res:
         return out
-    for key, suggestion in res["suggest"].items():
+    suggest_items = res["suggest"].items()
+    for key, suggestion in suggest_items:
         if not suggestion or not suggestion[0]["options"]:
             continue
         suggest_options = suggestion[0]["options"]
         if not suggest_options:
             continue
-        suggest_text = ""
-        for sug in suggest_options[:2]:
-            suggest_text += sug['text'] + " "
+        suggest_text = [sug["text"] for sug in suggest_options[:2]]
+        if flatten:
+            suggest_text = " ".join(suggest_text)
         if suggest_text:
-            out[key] = suggest_text.strip()
+            out[key] = suggest_text
     return out
+
 
 def get_trends(size: int = 10, days_back: int = 1):
     query = {
@@ -329,9 +318,11 @@ def get_trends(size: int = 10, days_back: int = 1):
     }
     return [keyword for keyword in es.search(index=INDEX, body=query)['aggregations']['trends']['buckets'] if keyword['key'][0].isalpha()]
 
+
 def add_ingested_date(post, ingested_at):
     post['ingested_at'] = ingested_at
     return post
+
 
 def index_contents(contents):
     ingested_at = datetime.now().isoformat()
@@ -343,36 +334,52 @@ def index_contents(contents):
         } for content in contents
     ]
     helpers.bulk(es, actions)
-    
 
-def add_match_query(field, value, query, match_type:QueryMatchType, search_type:SearchType=SearchType.any_words):
+
+def add_match_query(field, value, query, match_type: QueryMatchType, search_type: SearchType = SearchType.any_words):
     if value:
         res = get_match_query(search_type, value, field)
         query["query"]["bool"][str(match_type)].append(res)
-  
-def add_match_query_multi(field_values, query, match_type:QueryMatchType = QueryMatchType.should, search_type:SearchType = SearchType.any_words):
+
+
+def add_prefix_query(field, value, query, match_type: QueryMatchType = QueryMatchType.must):
+    if value:
+        query["query"]["bool"][match_type].append(
+            {"prefix": {field: {"value": value}}})
+
+
+def add_prefix_query_multi(field_values, query, match_type: QueryMatchType = QueryMatchType.must):
+    for field, value in field_values:
+        add_prefix_query(field, value, query, match_type)
+
+
+def add_match_query_multi(field_values, query, match_type: QueryMatchType = QueryMatchType.should, search_type: SearchType = SearchType.any_words):
     for field, value in field_values:
         add_match_query(field, value, query, match_type, search_type)
 
-def add_range_query(field, value, query, match_type:QueryMatchType = QueryMatchType.must, range_cmp="gte"):
-    if value and value > 0:
-        query["query"]["bool"][str(match_type)].append({"range": {field: {range_cmp: value}}})
 
-def add_range_query_multi(field_values, query, match_type:QueryMatchType = QueryMatchType.must, range_cmp="gte"):
+def add_range_query(field, value, query, match_type: QueryMatchType = QueryMatchType.must, range_cmp="gte"):
+    if value and value > 0:
+        query["query"]["bool"][str(match_type)].append(
+            {"range": {field: {range_cmp: value}}})
+
+
+def add_range_query_multi(field_values, query, match_type: QueryMatchType = QueryMatchType.must, range_cmp="gte"):
     for field, value in field_values:
-        add_range_query(field, value, query, match_type=match_type, range_cmp=range_cmp)
-        
+        add_range_query(field, value, query,
+                        match_type=match_type, range_cmp=range_cmp)
+
+
 def get_app_ids(size: int = 10):
     query = {
         "aggs": {
             "app-ids": {
                 "terms": {
-                    "field": "appId.keyword",
+                    "field": "metadata.appId.keyword",
                     "size": size
                 }
             }
-        }
+        },
+        "size": 0
     }
     return [keyword for keyword in es.search(index=POSTS_INDEX, body=query)['aggregations']['app-ids']['buckets']]
-   
-
