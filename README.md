@@ -1,6 +1,7 @@
 # Lens Search backend
+Click here to search: https://lens.sepana.io/
 
-This repository holds the backend source code for Lens Search. 
+This repository holds the backend source code for Lens Search.
 Open APIs are available to provide intergrated full-text search for any Lens dapp.
 
 - Data was called from the Lens protocol using [`The Graph`](https://thegraph.com/hosted-service/subgraph/anudit/lens-protocol?query=Get%20Posts)
