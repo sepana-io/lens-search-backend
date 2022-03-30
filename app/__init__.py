@@ -2,7 +2,7 @@ import os
 from enum import Enum
 from typing import List
 from services.lens_service import (
-    SearchType, ResultType, get_app_ids, get_trends, index_contents,
+    SearchType, ResultType, get_app_ids, get_publication_comments, get_trends, index_contents,
     MetadataSchema, search_nfts, search_profiles, search_publications
 )
 from fastapi import FastAPI, HTTPException, status
@@ -53,6 +53,11 @@ def get_application() -> FastAPI:
                                            min_profile_follower: int = None, min_profile_posts: int = None, app_id: str = None,
                                            from_date: date = None, to_date: date = None, page: int = 1, size: int = 10):
         return search_publications(text, bio, from_users, mention_users, search_type, result_type, min_collects, min_mirror, min_comments, min_profile_follower, min_profile_posts, app_id, from_date, to_date, page, size)
+    
+    @application.get("/comments")
+    @cache(expire=10)
+    async def get_publication_comments_endpoint(pub_id:str, page: int = 1, size: int = 10):
+        return get_publication_comments(pub_id, page, size)
 
     @application.get("/profiles")
     @cache(expire=10)

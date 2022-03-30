@@ -66,16 +66,45 @@ LENS_PROFILE_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-final-profiles-data")
 POSTS_INDEX = os.getenv("LENS_PROFILE_INDEX", "lens-final-posts-data")
 NFTS_INDEX = os.getenv("LENS_NFTS_INDEX", "lens-nfts-test-data")
 
+ES_RESPONSE_FIELDS = [
+    "metadata_id",
+    "description",
+    "content",
+    "external_url",
+    "name",
+    "attributes",
+    "image",
+    "imageMimeType",
+    "media",
+    "appId",
+    "profileId",
+    "ingested_at"
+]
 
 def get_match_query(search_type, text, field):
     if search_type == SearchType.hashtags:
-        text = " ".join(hashtag if "#" in hashtag else f"#{hashtag}" for hashtag in text.split(" "))
+        text = " ".join(
+            hashtag if "#" in hashtag else f"#{hashtag}" for hashtag in text.split(" "))
     res = {"match": {field: {"query": text}}}
     if search_type == SearchType.exact_phrase:
         res = {"match_phrase": {field: {"query": text}}}
     if search_type == SearchType.all_words:
         res = {"match": {field: {"query": text, "operator": "and"}}}
     return res
+
+def get_publication_comments(pub_id: str, page: int = 1, size: int = 10):
+    query = {
+        "query": {
+            "bool": {"must": [
+                {"match": {"mainPost.id.keyword": pub_id}}
+            ]}
+        },
+        "size": size,
+        "from": (page - 1 if page > 0 else 0) * size
+    }
+    res = es.search(index=POSTS_INDEX, body=query)
+    data = list(map(lambda x: x["_source"], res["hits"]["hits"]))
+    return {"page": page, "size": len(data), "total_count": res["hits"]["total"]["value"], "data": data}
 
 
 def search_publications(text="", bio: str = None, from_users: str = None, mention_users: str = None, search_type=SearchType.any_words,
@@ -84,11 +113,11 @@ def search_publications(text="", bio: str = None, from_users: str = None, mentio
                         to_date: date = None, page: int = 1, size: int = 10, retrying: bool = False):
 
     results_map = {"links": {"metadata.content": "http https"}, "photo": {
-        "metadata.media.type": "image"}, "video": {"metadata.media.type": "video"}}
+        "metadata.media.original.mimeType": "image"}, "video": {"metadata.media.original.mimeType": "video"}}
     result_type_info = results_map.get(
         result_type.value, {}) if result_type else {}
     must_query_field_values = {
-        "metadata.appId": app_id,
+        "appId": app_id,
         "profile.handle": from_users,
         "profile.bio": bio,
         "metadata.description": mention_users
@@ -112,7 +141,8 @@ def search_publications(text="", bio: str = None, from_users: str = None, mentio
     if len(res["hits"]["hits"]) == 0 and not retrying:
         suggestion_res = get_search_suggestion(res, False)
         bio = suggestion_res.get("profile.bio", [bio])[0] if bio else None
-        from_users = suggestion_res.get("profile.handle", from_users)[0] if from_users else None
+        # from_users = suggestion_res.get("profile.handle", from_users)[
+        #     0] if from_users else None
         # do not consider suggestion for must fields (handle and bio) again in should fields
         if bio:
             suggestion_res.pop("profile.bio", None)
@@ -375,7 +405,7 @@ def get_app_ids(size: int = 10):
         "aggs": {
             "app-ids": {
                 "terms": {
-                    "field": "metadata.appId.keyword",
+                    "field": "appId.keyword",
                     "size": size
                 }
             }
