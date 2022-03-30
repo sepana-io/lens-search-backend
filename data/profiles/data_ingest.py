@@ -42,10 +42,12 @@ def get_user_profiles(user_ids):
     return response.get("profiles", []).get("items", [])
 
 def add_followers_info(entries):
+    print("add_followers_info called..!!")
     profiles_data = []
     for entry in entries:
         profile_owned_by = entry['ownedBy']
         profile_id = entry['id']
+        # print(f"For profile_id: {profile_id}")
         followers = []
         total_user_ids.add(profile_id)
         total_user_addresses.add(profile_owned_by)
@@ -57,34 +59,36 @@ def add_followers_info(entries):
                 if wallet.get('defaultProfile', {}).get('id'):
                      followers.append(wallet.get('defaultProfile', {}).get('id'))   
         entry['followers'] = followers
-        profiles_data.append(UpdateOne({"_id": profile_id},{"$set": entry}, upsert=True))
+        profiles_data.append(UpdateOne({"_id": int(profile_id, base=16)},{"$set": entry}, upsert=True))
     if profiles_data:
         result = collection.bulk_write(profiles_data, ordered=False)
     return result
 
-def get_unordered_user_ids():
-    docs = list(collection.find({}).limit(50))
-    user_profiles = set()
-    user_follower_profiles = set()
-    for doc in docs:
-        user_id = doc['_id']
-        user_profiles.add(user_id)
-        for follower in doc['followers']:
-            user_follower_profiles.add(follower)
-    return list(user_follower_profiles - user_profiles)
+term_count = 0
 
 while True:
-    user_ids = [f"0x0{i}" if len(str(i))%2!=0 else f"0x{i}"\
-         for i in range(count, count+50)]
+    user_ids = []
+    for i in range(count, count+50):
+        user_id = hex(i)
+        if len(user_id)%2!=0:
+            user_ids.append(user_id.replace("0x", "0x0"))
+            continue
+        user_ids.append(user_id)
     entries = get_user_profiles(user_ids)
+    print(f"Number of users found {len(entries)}")
     if len(entries)==0:
-        time.sleep(60)
-        count = 1
+        term_count+=1
+        if term_count == 50:
+            print("Processing complete....\n\n\n")
+            time.sleep(60)
+            count = 1
+            term_count = 0
+            continue
+        count+=50
+        time.sleep(1)
         continue
+    term_count = 0
     result = add_followers_info(entries)
-    unordered_user_ids = get_unordered_user_ids()
-    entries = get_user_profiles(unordered_user_ids)
-    if entries:
-        result = add_followers_info(entries)
     count+=50
     time.sleep(1)
+
